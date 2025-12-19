@@ -137,38 +137,59 @@ io.on('connection', (socket) => {
     const { roomId } = data
     const room = rooms.get(roomId)
     
-    if (room) {
-      const player = room.players.find(p => p.socketId === socket.id)
-      if (player) {
-        player.ready = true
-        
-        // 检查是否所有玩家都准备好了
-        const allReady = room.players.every(p => p.ready)
-        
-        if (allReady && room.players.length === 2) {
-          // 初始化游戏状态
-          room.gameState = {
-            currentTurn: 0, // 0 = 玩家1, 1 = 玩家2
-            playerScores: [0, 0],
-            turnScores: [0, 0],
-            dice: [[], []], // 每个玩家的骰子
-            gameStarted: false
-          }
-          room.status = 'playing'
-          
-          // 通知游戏开始
-          io.to(roomId).emit('gameStart', {
-            roomId: roomId,
-            gameState: room.gameState,
-            players: room.players
-          })
-        } else {
-          // 通知玩家准备状态
-          io.to(roomId).emit('playerReadyUpdate', {
-            players: room.players
-          })
-        }
+    console.log('收到准备信号，房间ID:', roomId, '玩家ID:', socket.id)
+    
+    if (!room) {
+      console.error('房间不存在:', roomId)
+      return
+    }
+    
+    const player = room.players.find(p => p.socketId === socket.id)
+    if (!player) {
+      console.error('玩家不在房间中:', socket.id, '房间玩家:', room.players.map(p => p.socketId))
+      return
+    }
+    
+    player.ready = true
+    console.log('玩家已准备:', player.name, 'Socket ID:', socket.id)
+    console.log('房间玩家状态:', room.players.map(p => ({ name: p.name, ready: p.ready, socketId: p.socketId })))
+    
+    // 检查是否所有玩家都准备好了
+    const allReady = room.players.every(p => p.ready)
+    const playerCount = room.players.length
+    
+    console.log('准备检查 - 所有玩家准备好:', allReady, '玩家数量:', playerCount)
+    
+    if (allReady && playerCount === 2) {
+      // 初始化游戏状态
+      room.gameState = {
+        currentTurn: 0, // 0 = 玩家1, 1 = 玩家2
+        playerScores: [0, 0],
+        turnScores: [0, 0],
+        dice: [[], []], // 每个玩家的骰子
+        gameStarted: true
       }
+      room.status = 'playing'
+      
+      console.log('✅ 游戏开始，房间:', roomId)
+      console.log('玩家列表:', room.players.map(p => ({ id: p.socketId, name: p.name, index: room.players.indexOf(p) })))
+      console.log('当前回合:', room.gameState.currentTurn)
+      console.log('发送 gameStart 事件到房间:', roomId)
+      
+      // 通知游戏开始
+      io.to(roomId).emit('gameStart', {
+        roomId: roomId,
+        gameState: room.gameState,
+        players: room.players
+      })
+      
+      console.log('gameStart 事件已发送')
+    } else {
+      console.log('等待更多玩家准备...', { allReady, playerCount })
+      // 通知玩家准备状态
+      io.to(roomId).emit('playerReadyUpdate', {
+        players: room.players
+      })
     }
   })
 

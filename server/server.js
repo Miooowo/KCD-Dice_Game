@@ -157,36 +157,99 @@ function cleanupRoom(roomId) {
 io.on('connection', (socket) => {
   console.log('玩家连接:', socket.id)
 
-  // 加入匹配队列
-  socket.on('findMatch', (playerData) => {
-    const playerId = playerData.playerId || socket.id // 使用玩家ID或Socket ID
-    console.log('玩家寻找匹配:', socket.id, '玩家ID:', playerId, '名称:', playerData.name || '玩家')
-    console.log('当前等待队列长度:', waitingPlayers.length)
+  // 创建房间
+  socket.on('createRoom', (playerData) => {
+    const playerId = playerData.playerId || socket.id
+    console.log('玩家创建房间:', socket.id, '玩家ID:', playerId, '名称:', playerData.name || '玩家')
     
-    const { room, isHost } = matchPlayers(playerId, playerData, socket.id)
+    const room = createRoom(playerId, playerData, socket.id)
     socket.join(room.id)
     
-    console.log('玩家加入房间:', room.id, '是房主:', isHost, '房间玩家数:', room.players.length)
+    console.log('房间创建成功，房间ID:', room.id, '玩家数:', room.players.length)
+    
+    // 通知玩家房间创建成功
+    socket.emit('roomCreated', {
+      roomId: room.id,
+      isHost: true,
+      players: room.players,
+      bet: room.bet
+    })
+  })
+
+  // 加入房间
+  socket.on('joinRoom', (data) => {
+    const { roomId, playerData } = data
+    const playerId = playerData.playerId || socket.id
+    console.log('玩家尝试加入房间:', socket.id, '房间ID:', roomId, '玩家ID:', playerId)
+    
+    const room = rooms.get(roomId)
+    
+    if (!room) {
+      console.log('房间不存在:', roomId)
+      socket.emit('joinRoomError', {
+        message: '房间不存在，请检查房间号是否正确'
+      })
+      return
+    }
+    
+    if (room.players.length >= 2) {
+      console.log('房间已满:', roomId)
+      socket.emit('joinRoomError', {
+        message: '房间已满，无法加入'
+      })
+      return
+    }
+    
+    // 检查玩家是否已在房间中（重连情况）
+    const existingPlayer = room.players.find(p => p.id === playerId)
+    if (existingPlayer) {
+      // 重连，更新 socketId
+      existingPlayer.socketId = socket.id
+      const session = playerSessions.get(playerId)
+      if (session) {
+        session.socketId = socket.id
+      }
+      console.log('玩家重连，恢复房间:', roomId, '玩家:', playerId)
+    } else {
+      // 新玩家加入
+      room.players.push({
+        id: playerId,
+        name: playerData.name || '玩家2',
+        socketId: socket.id,
+        ready: false,
+        diceConfig: playerData.diceConfig || Array(6).fill('ordinary')
+      })
+      
+      // 保存玩家会话
+      playerSessions.set(playerId, {
+        socketId: socket.id,
+        roomId: roomId,
+        playerData: playerData
+      })
+      
+      console.log('新玩家加入房间:', roomId, '玩家:', playerId)
+    }
+    
+    socket.join(roomId)
+    
+    console.log('房间玩家数:', room.players.length)
     console.log('房间玩家列表:', room.players.map(p => ({ id: p.socketId, name: p.name })))
     
-    // 通知玩家加入房间
-    socket.emit('matched', {
-      roomId: room.id,
-      isHost: isHost,
+    // 通知所有玩家房间状态更新
+    io.to(roomId).emit('roomJoined', {
+      roomId: roomId,
       players: room.players,
       bet: room.bet
     })
     
     // 如果房间已满，通知所有玩家
     if (room.players.length === 2) {
-      console.log('✅ 房间已满，通知所有玩家，房间ID:', room.id)
-      io.to(room.id).emit('roomReady', {
-        roomId: room.id,
+      console.log('✅ 房间已满，通知所有玩家，房间ID:', roomId)
+      io.to(roomId).emit('roomReady', {
+        roomId: roomId,
         players: room.players,
         bet: room.bet
       })
-    } else {
-      console.log('⏳ 房间未满，等待更多玩家，当前玩家数:', room.players.length)
     }
   })
 

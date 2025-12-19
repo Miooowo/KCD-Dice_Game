@@ -39,11 +39,14 @@ function OnlineGame({ playerGroschen, setPlayerGroschen, playerName, currentBet,
   const [turnScore, setTurnScore] = useState(0)
   const [opponentScore, setOpponentScore] = useState(0)
   const [opponentTurnScore, setOpponentTurnScore] = useState(0)
-  const [logs, setLogs] = useState(['正在寻找对手...'])
+  const [logs, setLogs] = useState(['正在连接服务器...'])
   const [resultModal, setResultModal] = useState({ show: false, type: 'win', message: '', winnings: 0 })
   const [confirmModal, setConfirmModal] = useState({ show: false, message: '', onConfirm: null })
-  const [matching, setMatching] = useState(true)
+  const [matching, setMatching] = useState(false)
   const [players, setPlayers] = useState([])
+  const [showRoomInput, setShowRoomInput] = useState(true) // 显示房间号输入界面
+  const [inputRoomId, setInputRoomId] = useState('') // 输入的房间号
+  const [createdRoomId, setCreatedRoomId] = useState(null) // 创建的房间号
   
   // 获取玩家选中的骰子配置
   const [playerDiceConfig, setPlayerDiceConfig] = useState(() => {
@@ -117,31 +120,61 @@ function OnlineGame({ playerGroschen, setPlayerGroschen, playerName, currentBet,
       
       newSocket.on('connect', () => {
         console.log('已连接到服务器')
-        setLogs(prev => ['> 已连接到服务器，正在寻找对手...', ...prev])
+        setLogs(prev => ['> 已连接到服务器', ...prev])
+        setMatching(false)
+        // 不自动匹配，等待用户创建或加入房间
+      })
+      
+      // 房间创建成功
+      newSocket.on('roomCreated', (data) => {
+        console.log('房间创建成功:', data)
+        setRoomId(data.roomId)
+        setCreatedRoomId(data.roomId)
+        setIsHost(true)
+        setPlayers(data.players)
+        setShowRoomInput(false)
+        setLogs(prev => [`> 房间创建成功！房间号: ${data.roomId}`, '> 等待其他玩家加入...', ...prev])
+      })
+      
+      // 加入房间成功
+      newSocket.on('roomJoined', (data) => {
+        console.log('加入房间成功:', data)
+        setRoomId(data.roomId)
+        setIsHost(false)
+        setPlayers(data.players)
+        setShowRoomInput(false)
         
-        // 发送匹配请求（包含玩家ID用于重连恢复）
-        const diceConfig = playerDiceConfig || Array(6).fill('ordinary')
-        newSocket.emit('findMatch', {
-          playerId: playerIdRef.current, // 发送玩家ID用于重连恢复
-          name: playerName || '玩家',
-          bet: currentBet,
-          diceConfig: diceConfig
-        })
+        const opponent = data.players.find(p => p.id !== playerIdRef.current)
+        if (opponent) {
+          setOpponentName(opponent.name)
+        }
+        
+        setLogs(prev => [`> 成功加入房间: ${data.roomId}`, ...prev])
+      })
+      
+      // 加入房间失败
+      newSocket.on('joinRoomError', (data) => {
+        console.error('加入房间失败:', data)
+        setLogs(prev => [`> ❌ ${data.message}`, ...prev])
+        setInputRoomId('') // 清空输入
       })
       
       newSocket.on('reconnect', (attemptNumber) => {
       console.log('重新连接成功，尝试次数:', attemptNumber)
       setLogs(prev => [`> ✅ 重新连接到服务器（尝试 ${attemptNumber} 次）`, ...prev])
       
-      // 重连后自动恢复匹配
+      // 重连后自动恢复房间
       if (roomId) {
         console.log('重连后恢复房间:', roomId)
         const diceConfig = playerDiceConfig || Array(6).fill('ordinary')
-        newSocket.emit('findMatch', {
-          playerId: playerIdRef.current,
-          name: playerName || '玩家',
-          bet: currentBet,
-          diceConfig: diceConfig
+        newSocket.emit('joinRoom', {
+          roomId: roomId,
+          playerData: {
+            playerId: playerIdRef.current,
+            name: playerName || '玩家',
+            bet: currentBet,
+            diceConfig: diceConfig
+          }
         })
       }
     })
@@ -161,22 +194,6 @@ function OnlineGame({ playerGroschen, setPlayerGroschen, playerName, currentBet,
         '> 3. 网络连接是否正常',
         ...prev
       ])
-    })
-    
-    newSocket.on('matched', (data) => {
-      console.log('匹配成功:', data)
-      setRoomId(data.roomId)
-      setIsHost(data.isHost)
-      setPlayers(data.players)
-      playerIndexRef.current = data.isHost ? 0 : 1
-      
-      const opponent = data.players.find(p => p.socketId !== newSocket.id)
-      if (opponent) {
-        setOpponentName(opponent.name)
-      }
-      
-      setLogs(prev => ['> 已找到对手！等待对手准备...', ...prev])
-      setMatching(false)
     })
     
     newSocket.on('roomReady', (data) => {
@@ -372,6 +389,40 @@ function OnlineGame({ playerGroschen, setPlayerGroschen, playerName, currentBet,
   const getSelectedDiceTypes = useCallback(() => {
     return dice.filter(d => d.selected).map(d => d.diceType || 'ordinary')
   }, [dice])
+  
+  // 创建房间
+  const handleCreateRoom = useCallback(() => {
+    if (socket) {
+      const diceConfig = playerDiceConfig || Array(6).fill('ordinary')
+      socket.emit('createRoom', {
+        playerId: playerIdRef.current,
+        name: playerName || '玩家',
+        bet: currentBet,
+        diceConfig: diceConfig
+      })
+      setLogs(prev => ['> 正在创建房间...', ...prev])
+    }
+  }, [socket, playerName, currentBet, playerDiceConfig])
+  
+  // 加入房间
+  const handleJoinRoom = useCallback(() => {
+    if (socket && inputRoomId.trim()) {
+      const roomId = inputRoomId.trim().toUpperCase()
+      const diceConfig = playerDiceConfig || Array(6).fill('ordinary')
+      socket.emit('joinRoom', {
+        roomId: roomId,
+        playerData: {
+          playerId: playerIdRef.current,
+          name: playerName || '玩家',
+          bet: currentBet,
+          diceConfig: diceConfig
+        }
+      })
+      setLogs(prev => [`> 正在加入房间: ${roomId}...`, ...prev])
+    } else {
+      setLogs(prev => ['> ❌ 请输入房间号', ...prev])
+    }
+  }, [socket, inputRoomId, playerName, currentBet, playerDiceConfig])
   
   // 玩家准备
   const handleReady = useCallback(() => {
@@ -576,15 +627,57 @@ function OnlineGame({ playerGroschen, setPlayerGroschen, playerName, currentBet,
       </div>
       
       <div className="game-controls">
-        {matching && (
+        {!socket && (
           <div className="matching-status">
             <p>正在连接服务器...</p>
             <p className="server-hint">如果长时间无法连接，请检查服务器是否运行在 {SERVER_URL}</p>
-            <p className="server-hint">启动服务器: cd server && npm install && npm start</p>
           </div>
         )}
         
-        {!matching && !gameStarted && (
+        {showRoomInput && socket && (
+          <div className="room-input-panel">
+            <h3>创建或加入房间</h3>
+            <div className="room-actions">
+              <button 
+                className="game-button create-room-button"
+                onClick={handleCreateRoom}
+                disabled={!socket}
+              >
+                创建房间
+              </button>
+              <div className="room-join-section">
+                <input
+                  type="text"
+                  value={inputRoomId}
+                  onChange={(e) => setInputRoomId(e.target.value.toUpperCase())}
+                  placeholder="输入房间号"
+                  className="room-input"
+                  maxLength={6}
+                  onKeyPress={(e) => {
+                    if (e.key === 'Enter') {
+                      handleJoinRoom()
+                    }
+                  }}
+                />
+                <button 
+                  className="game-button join-room-button"
+                  onClick={handleJoinRoom}
+                  disabled={!socket || !inputRoomId.trim()}
+                >
+                  加入房间
+                </button>
+              </div>
+            </div>
+            {createdRoomId && (
+              <div className="room-id-display">
+                <p>房间号: <strong>{createdRoomId}</strong></p>
+                <p className="room-hint">将房间号分享给其他玩家</p>
+              </div>
+            )}
+          </div>
+        )}
+        
+        {!showRoomInput && !gameStarted && roomId && (
           <button 
             className="game-button ready-button"
             onClick={handleReady}

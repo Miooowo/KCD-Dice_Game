@@ -67,19 +67,29 @@ function createRoom(playerId, playerData) {
 function matchPlayers(playerId, playerData) {
   if (waitingPlayers.length === 0) {
     // 没有等待的玩家，创建新房间
-    waitingPlayers.push({ id: playerId, data: playerData })
     const room = createRoom(playerId, playerData)
+    // 保存 roomId 到等待队列
+    waitingPlayers.push({ 
+      id: playerId, 
+      data: playerData,
+      roomId: room.id  // 保存房间ID
+    })
+    console.log('创建新房间等待匹配，房间ID:', room.id, '玩家:', playerId)
     return { room, isHost: true }
   } else {
     // 找到等待的玩家，加入房间
     const waitingPlayer = waitingPlayers.shift()
-    const roomId = waitingPlayer.roomId || generateRoomId()
+    const roomId = waitingPlayer.roomId
     let room = rooms.get(roomId)
     
     if (!room) {
-      // 如果房间不存在，创建新房间
+      console.error('房间不存在，但等待队列中有玩家，房间ID:', roomId)
+      // 如果房间不存在，创建新房间（这种情况不应该发生）
       room = createRoom(waitingPlayer.id, waitingPlayer.data)
     }
+    
+    console.log('第二个玩家加入房间，房间ID:', roomId, '新玩家:', playerId, '原玩家:', waitingPlayer.id)
+    console.log('加入前房间玩家数:', room.players.length)
     
     // 添加第二个玩家
     room.players.push({
@@ -89,6 +99,9 @@ function matchPlayers(playerId, playerData) {
       ready: false,
       diceConfig: playerData.diceConfig || Array(6).fill('ordinary')
     })
+    
+    console.log('加入后房间玩家数:', room.players.length)
+    console.log('房间玩家列表:', room.players.map(p => ({ id: p.socketId, name: p.name })))
     
     rooms.set(roomId, room)
     return { room, isHost: false }
@@ -109,10 +122,14 @@ io.on('connection', (socket) => {
 
   // 加入匹配队列
   socket.on('findMatch', (playerData) => {
-    console.log('玩家寻找匹配:', socket.id, playerData)
+    console.log('玩家寻找匹配:', socket.id, playerData.name || '玩家')
+    console.log('当前等待队列长度:', waitingPlayers.length)
     
     const { room, isHost } = matchPlayers(socket.id, playerData)
     socket.join(room.id)
+    
+    console.log('玩家加入房间:', room.id, '是房主:', isHost, '房间玩家数:', room.players.length)
+    console.log('房间玩家列表:', room.players.map(p => ({ id: p.socketId, name: p.name })))
     
     // 通知玩家加入房间
     socket.emit('matched', {
@@ -124,11 +141,14 @@ io.on('connection', (socket) => {
     
     // 如果房间已满，通知所有玩家
     if (room.players.length === 2) {
+      console.log('✅ 房间已满，通知所有玩家，房间ID:', room.id)
       io.to(room.id).emit('roomReady', {
         roomId: room.id,
         players: room.players,
         bet: room.bet
       })
+    } else {
+      console.log('⏳ 房间未满，等待更多玩家，当前玩家数:', room.players.length)
     }
   })
 

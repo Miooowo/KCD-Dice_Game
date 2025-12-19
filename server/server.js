@@ -37,6 +37,7 @@ app.get('/health', (req, res) => {
 // 游戏房间管理
 const rooms = new Map() // roomId -> { players: [], gameState: {}, bet: {} }
 const waitingPlayers = [] // 等待匹配的玩家队列
+const playerSessions = new Map() // playerId -> { socketId, roomId, playerData } 用于重连恢复
 
 // 生成房间ID
 function generateRoomId() {
@@ -44,14 +45,14 @@ function generateRoomId() {
 }
 
 // 创建房间
-function createRoom(playerId, playerData) {
+function createRoom(playerId, playerData, socketId) {
   const roomId = generateRoomId()
   const room = {
     id: roomId,
     players: [{
       id: playerId,
       name: playerData.name || '玩家1',
-      socketId: playerId,
+      socketId: socketId, // 使用实际的 socket.id
       ready: false,
       diceConfig: playerData.diceConfig || Array(6).fill('ordinary')
     }],
@@ -60,14 +61,41 @@ function createRoom(playerId, playerData) {
     status: 'waiting' // waiting, playing, finished
   }
   rooms.set(roomId, room)
+  
+  // 保存玩家会话信息用于重连
+  playerSessions.set(playerId, {
+    socketId: socketId,
+    roomId: roomId,
+    playerData: playerData
+  })
+  
   return room
 }
 
 // 匹配玩家
-function matchPlayers(playerId, playerData) {
+function matchPlayers(playerId, playerData, socketId) {
+  // 检查是否是重连
+  const existingSession = playerSessions.get(playerId)
+  if (existingSession) {
+    const room = rooms.get(existingSession.roomId)
+    if (room) {
+      // 更新玩家的 socketId
+      const player = room.players.find(p => p.id === playerId)
+      if (player) {
+        player.socketId = socketId
+        existingSession.socketId = socketId
+        console.log('玩家重连，恢复房间:', existingSession.roomId, '玩家:', playerId)
+        return { room, isHost: room.players[0].id === playerId }
+      }
+    } else {
+      // 房间不存在，清除会话
+      playerSessions.delete(playerId)
+    }
+  }
+  
   if (waitingPlayers.length === 0) {
     // 没有等待的玩家，创建新房间
-    const room = createRoom(playerId, playerData)
+    const room = createRoom(playerId, playerData, socketId)
     // 保存 roomId 到等待队列
     waitingPlayers.push({ 
       id: playerId, 
@@ -84,8 +112,10 @@ function matchPlayers(playerId, playerData) {
     
     if (!room) {
       console.error('房间不存在，但等待队列中有玩家，房间ID:', roomId)
-      // 如果房间不存在，创建新房间（这种情况不应该发生）
-      room = createRoom(waitingPlayer.id, waitingPlayer.data)
+      // 如果房间不存在，从会话中获取 socketId 或使用当前 socketId
+      const session = playerSessions.get(waitingPlayer.id)
+      const waitingSocketId = session ? session.socketId : socketId
+      room = createRoom(waitingPlayer.id, waitingPlayer.data, waitingSocketId)
     }
     
     console.log('第二个玩家加入房间，房间ID:', roomId, '新玩家:', playerId, '原玩家:', waitingPlayer.id)
@@ -95,9 +125,16 @@ function matchPlayers(playerId, playerData) {
     room.players.push({
       id: playerId,
       name: playerData.name || '玩家2',
-      socketId: playerId,
+      socketId: socketId,
       ready: false,
       diceConfig: playerData.diceConfig || Array(6).fill('ordinary')
+    })
+    
+    // 保存第二个玩家的会话
+    playerSessions.set(playerId, {
+      socketId: socketId,
+      roomId: roomId,
+      playerData: playerData
     })
     
     console.log('加入后房间玩家数:', room.players.length)
@@ -122,10 +159,11 @@ io.on('connection', (socket) => {
 
   // 加入匹配队列
   socket.on('findMatch', (playerData) => {
-    console.log('玩家寻找匹配:', socket.id, playerData.name || '玩家')
+    const playerId = playerData.playerId || socket.id // 使用玩家ID或Socket ID
+    console.log('玩家寻找匹配:', socket.id, '玩家ID:', playerId, '名称:', playerData.name || '玩家')
     console.log('当前等待队列长度:', waitingPlayers.length)
     
-    const { room, isHost } = matchPlayers(socket.id, playerData)
+    const { room, isHost } = matchPlayers(playerId, playerData, socket.id)
     socket.join(room.id)
     
     console.log('玩家加入房间:', room.id, '是房主:', isHost, '房间玩家数:', room.players.length)
@@ -344,30 +382,56 @@ io.on('connection', (socket) => {
   })
 
   // 断开连接
-  socket.on('disconnect', () => {
-    console.log('玩家断开连接:', socket.id)
+  socket.on('disconnect', (reason) => {
+    console.log('玩家断开连接:', socket.id, '原因:', reason)
     
-    // 从等待队列中移除
-    const waitingIndex = waitingPlayers.findIndex(p => p.id === socket.id)
-    if (waitingIndex !== -1) {
-      waitingPlayers.splice(waitingIndex, 1)
-    }
-    
-    // 从房间中移除
+    // 查找玩家的房间
+    let playerFound = false
     for (const [roomId, room] of rooms.entries()) {
-      const playerIndex = room.players.findIndex(p => p.socketId === socket.id)
-      if (playerIndex !== -1) {
-        room.players.splice(playerIndex, 1)
+      const player = room.players.find(p => p.socketId === socket.id)
+      if (player) {
+        playerFound = true
+        console.log('找到玩家房间:', roomId, '玩家:', player.name)
         
-        // 通知对手玩家离开
-        socket.to(roomId).emit('playerLeft', {
-          message: '对手已离开游戏'
-        })
-        
-        // 清理房间
-        cleanupRoom(roomId)
+        // 如果是正常关闭（客户端关闭页面），立即移除
+        // 如果是网络问题（transport close），等待重连
+        if (reason === 'transport close' || reason === 'ping timeout') {
+          // 网络问题，等待重连（不立即移除）
+          console.log('网络断开，等待重连，玩家:', player.name)
+          // 通知对手玩家暂时断开
+          socket.to(roomId).emit('playerDisconnected', {
+            message: `${player.name} 暂时断开连接，等待重连...`
+          })
+        } else {
+          // 正常断开，移除玩家
+          console.log('正常断开，移除玩家:', player.name)
+          room.players.splice(room.players.indexOf(player), 1)
+          
+          // 清除会话
+          playerSessions.delete(player.id)
+          
+          // 通知对手玩家离开
+          socket.to(roomId).emit('playerLeft', {
+            message: '对手已离开游戏'
+          })
+          
+          // 清理房间
+          cleanupRoom(roomId)
+        }
         break
       }
+    }
+    
+    // 从等待队列中移除（使用 socket.id 匹配）
+    const waitingIndex = waitingPlayers.findIndex(p => {
+      const session = playerSessions.get(p.id)
+      return session && session.socketId === socket.id
+    })
+    if (waitingIndex !== -1) {
+      const waitingPlayer = waitingPlayers[waitingIndex]
+      playerSessions.delete(waitingPlayer.id)
+      waitingPlayers.splice(waitingIndex, 1)
+      console.log('从等待队列移除:', waitingPlayer.id)
     }
   })
 })
